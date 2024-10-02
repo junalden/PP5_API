@@ -1,71 +1,66 @@
 <?php
-require 'vendor/autoload.php';
+// Function to convert a local file to Base64
+function fileToGenerativePart($filePath, $mimeType) {
+    if (file_exists($filePath)) {
+        $data = file_get_contents($filePath);
+        return [
+            'inlineData' => [
+                'data' => base64_encode($data),  // Convert to Base64
+                'mimeType' => $mimeType
+            ],
+        ];
+    } else {
+        throw new Exception("File not found: " . $filePath);
+    }
+}
 
-use Google\Cloud\Storage\StorageClient;
-
-// Set up Google Cloud credentials from environment variable
-putenv('GOOGLE_APPLICATION_CREDENTIALS=' . getenv('GOOGLE_APPLICATION_CREDENTIALS'));
-
-// Google Cloud Storage configuration
-$bucketName = getenv('GCS_BUCKET_NAME');  // Bucket name from environment variable
-$bucketPath = 'uploads/';  // Directory inside the bucket to store files
-
+// Handle the file upload
 if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     if (isset($_FILES['imageFile']) && $_FILES['imageFile']['error'] == UPLOAD_ERR_OK) {
         $fileTmpPath = $_FILES['imageFile']['tmp_name'];  // Temporary file path
         $fileName = $_FILES['imageFile']['name'];  // Original file name
+        $mimeType = $_FILES['imageFile']['type']; // MIME type of the uploaded file
 
         try {
-            // Initialize Google Cloud Storage client
-            $storage = new StorageClient();
-            $bucket = $storage->bucket($bucketName);
+            // Prepare the part from the uploaded image
+            $filePart = fileToGenerativePart($fileTmpPath, $mimeType);
 
-            // Upload file to Google Cloud Storage
-            $gcsObjectName = $bucketPath . $fileName;
-            $bucket->upload(
-                fopen($fileTmpPath, 'r'),
-                [
-                    'name' => $gcsObjectName
-                ]
-            );
+            // Example: Preparing the data to send to the Google Generative AI API
+            $apiKey = getenv('API_KEY');  // Access your API key from environment variables
+            $genAIUrl = 'https://generative-ai.googleapis.com/v1/generate'; // Replace with the actual API endpoint
 
-            // Get the public URL of the uploaded file
-            $fileUrl = sprintf('https://storage.googleapis.com/%s/%s', $bucketName, $gcsObjectName);
+            $postData = [
+                'parts' => [$filePart] // Combine the single part into an array
+            ];
 
-            // Send file URL to Gemini Vision API for processing
-            $geminiResponse = sendToGeminiVision($fileUrl);
+            // Initialize cURL session
+            $ch = curl_init($genAIUrl);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_HTTPHEADER, [
+                'Content-Type: application/json',
+                'Authorization: Bearer ' . $apiKey // Use API key for authentication
+            ]);
+            curl_setopt($ch, CURLOPT_POST, true);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($postData));
 
-            // Return the result as JSON
-            echo json_encode(['status' => 'success', 'text' => $geminiResponse]);
+            // Execute cURL and fetch the response
+            $response = curl_exec($ch);
+            curl_close($ch);
+
+            // Handle the response
+            $responseData = json_decode($response, true);
+            if (isset($responseData['result'])) {
+                echo json_encode(['status' => 'success', 'result' => $responseData['result']]);
+            } else {
+                echo json_encode(['status' => 'error', 'message' => 'No result returned from API.']);
+            }
         } catch (Exception $e) {
-            echo json_encode(['status' => 'error', 'text' => 'Error uploading file: ' . $e->getMessage()]);
+            echo json_encode(['status' => 'error', 'message' => $e->getMessage()]);
         }
     } else {
-        echo json_encode(['status' => 'error', 'text' => 'File upload error']);
+        echo json_encode(['status' => 'error', 'message' => 'File upload error']);
     }
+} else {
+    echo json_encode(['status' => 'error', 'message' => 'Invalid request method']);
 }
-
-// Function to send file to Gemini Vision API for processing
-function sendToGeminiVision($fileUrl) {
-    $geminiApiUrl = getenv('GEMINI_API_URL'); // API URL from environment variable
-
-    $postData = json_encode([
-        'fileUrl' => $fileUrl  // Send the GCS file URL to Gemini for processing
-    ]);
-
-    $ch = curl_init($geminiApiUrl);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        'Content-Type: application/json',
-        'Authorization: Bearer ' . getenv('GEMINI_API_KEY') // API key from environment variable
-    ]);
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $postData);
-
-    $response = curl_exec($ch);
-    curl_close($ch);
-
-    // Assuming the API returns the processed text result
-    $responseData = json_decode($response, true);
-    return $responseData['result'] ?? 'No result returned from Gemini Vision API';
-}
+?>
